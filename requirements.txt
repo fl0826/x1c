@@ -1,0 +1,6 @@
+trimesh>=4.0.0
+usd-core>=24.0
+
+# AI 生成功能（可选）
+# anthropic>=0.20.0
+# openai>=1.0.0

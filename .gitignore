@@ -1,13 +1,11 @@
-# 凭据
 .env
-
-# 运行时产物
-output/
-logs/
-.test-tmp/
-__pycache__/
 *.pyc
-
-# 备份与转换产生的中间文件
-*.bak
-*.stl
+__pycache__/
+output/*.stl
+output/*.png
+logs/
+outbox/*.3mf
+.test-tmp/
+*.log
+.DS_Store
+Thumbs.db

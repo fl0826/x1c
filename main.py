@@ -1,297 +1,302 @@
-"""3D 打印助手 —— 命令行入口。
+"""3D打印助手 - 核心功能
 
-真正的能力在 api.py，这里只负责解析参数、把结果打印成人能看的文字。
-想在其他程序里调用，直接 import api。
+功能：
+1. 上传 3MF 文件到打印机
+2. 上传并自动打印
+3. 查询打印机状态
+4. 大模型生成 3D 模型
 
-用法:
-    python main.py design  "做个放两节5号电池的槽子"        # 一句话 → STL
-    python main.py design  "照着照片做个支架" -i 照片.jpg    # 带照片
-    python main.py convert 扫描件.usdz          # USDZ → STL
-    python main.py upload  切片.3mf             # 上传到打印机
-    python main.py print   切片.3mf             # 上传（如需要）+ 开打
-    python main.py print   切片.3mf --ams 0     # 指定 AMS 槽位  四个槽位 0123
-    python main.py status                       # 查看打印进度
-
-料在 AMS 里时默认取 0 号槽（0-3 用 --ams 指定）。
-
-design 需要 .env 里配置 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL。
-convert 需要额外依赖: conda activate fnn（trimesh + usd-core）。
+用法：
+    # 只上传
+    python main.py upload 文件.3mf
+    
+    # 上传+打印
+    python main.py print 文件.3mf
+    python main.py print 文件.3mf --ams 1
+    
+    # 查询状态
+    python main.py status
+    
+    # AI 生成（实验性）
+    python main.py generate "做个手机支架"
 """
 
-import logging
 import sys
 from pathlib import Path
 
-# Windows 控制台默认不是 UTF-8，直接 print 中文/符号会崩
-if sys.platform == "win32":
+# Windows 控制台编码（幂等：重复 import 也不会崩）
+if sys.platform == 'win32':
     for _stream in (sys.stdout, sys.stderr):
         try:
-            _stream.reconfigure(encoding="utf-8", errors="replace")
+            _stream.reconfigure(encoding='utf-8', errors='replace')
         except (AttributeError, ValueError):
             pass
 
 _HERE = Path(__file__).resolve().parent
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
-
-# 默认只显示错误；-v 才看底层重连、TLS 等细节
-logging.basicConfig(
-    level=logging.INFO if any(a in ("-v", "--verbose") for a in sys.argv[1:])
-    else logging.ERROR,
-    format="%(levelname)-7s %(name)s: %(message)s",
-)
+sys.path.insert(0, str(_HERE))
 
 
-# ---------------------------------------------------------------- 各命令
-
-
-def cmd_convert() -> int:
-    """USDZ → STL"""
-    args = [a for a in sys.argv[2:] if not a.startswith("-")]
-    if not args:
-        print("用法: python main.py convert 扫描件.usdz [-o 输出.stl]")
+def cmd_upload():
+    """上传 3MF 文件到打印机"""
+    if len(sys.argv) < 3:
+        print("用法: python main.py upload 文件.3mf")
         return 1
-
-    from convert_usdz_to_stl import convert_usdz_to_stl
-
-    path = Path(args[0])
-    output = Path(args[1]) if len(args) > 1 else None
-
-    if not path.exists():
-        print(f"✗ 文件不存在: {path}")
+    
+    file_path = Path(sys.argv[2])
+    if not file_path.exists():
+        print(f"❌ 文件不存在: {file_path}")
         return 1
-    if path.suffix.lower() != ".usdz":
-        print(f"✗ 只支持 .usdz（当前: {path.suffix or '无扩展名'}）")
+    
+    if file_path.suffix.lower() != ".3mf":
+        print(f"❌ 只支持 .3mf 文件")
         return 1
-
-    return 0 if convert_usdz_to_stl(path, output) else 1
-
-
-def cmd_upload() -> int:
-    """上传切片文件"""
-    args = [a for a in sys.argv[2:] if not a.startswith("-")]
-    if not args:
-        print("用法: python main.py upload 切片.3mf")
-        return 1
-
-    import api
-
-    result = api.upload_file(args[0])
-    if not result.get("ok"):
-        print(f"✗ {result.get('error')}")
-        if result.get("hint"):
-            print(f"  {result['hint']}")
-        return 1
-
-    print("=" * 60)
-    print("✅ 上传成功")
-    print("=" * 60)
-    print(f"  文件: {result['name']}")
-    print(f"  大小: {result.get('size')} 字节")
-    print("\n下一步: python main.py print 同一个文件")
-    return 0
-
-
-def _parse_print_args(argv: list[str]) -> tuple[Path | None, int]:
-    """解析 `print` 的参数：文件路径 + --ams 槽位（0-3，默认 0）。"""
-    path: Path | None = None
-    ams = 0
-    index = 0
-    while index < len(argv):
-        item = argv[index]
-        if item == "--ams":
-            if index + 1 >= len(argv):
-                print("用法: --ams 0-3，例如 --ams 1")
-                return None, 0
-            try:
-                ams = int(argv[index + 1])
-            except ValueError:
-                print(f"✗ --ams 需要 0-3 的数字，收到 {argv[index + 1]!r}")
-                return None, 0
-            if not 0 <= ams <= 3:
-                print(f"✗ AMS 槽位只能是 0-3，收到 {ams}")
-                return None, 0
-            index += 2
-            continue
-        if not item.startswith("--"):
-            path = Path(item)
-        index += 1
-    return path, ams
-
-
-def cmd_print() -> int:
-    """上传（如需要）+ 开始打印"""
-    path, ams = _parse_print_args(sys.argv[2:])
-    if path is None:
-        print("用法: python main.py print 切片.3mf [--ams 0-3|none]")
-        return 1
-    if not path.exists():
-        print(f"✗ 文件不存在: {path}")
-        return 1
-
-    import api
-
-    name = path.name
-
-    # 打印机上没有就先传上去；已有同一份文件就跳过
-    info = api.remote_file_info(name)
-    if not info.get("connected"):
-        print(f"✗ {info.get('error')}")
-        print("  确认打印机开机、和电脑在同一网段后再试")
-        return 1
-    if info.get("size") is None:
-        print(f"打印机上没有 {name}，先上传 ...")
-        uploaded = api.upload_file(path)
-        if not uploaded.get("ok"):
-            print(f"✗ {uploaded.get('error')}")
-            if uploaded.get("hint"):
-                print(f"  {uploaded['hint']}")
-            return 1
-        print(f"已上传: {uploaded.get('size')} 字节")
-    else:
-        print(f"打印机上已有: {name}（跳过上传）")
-
-    result = api.start_print(name, ams_slot=ams)
-    if not result.get("ok"):
-        print(f"✗ {result.get('error')}")
-        if result.get("stage") == "busy":
-            print(f"  当前任务: {result.get('file')}  {result.get('percent')}%")
-        return 1
-
-    if result.get("started"):
-        print(f"\n✅ 已开始打印（状态 {result['state']}）")
-        print("   用 python main.py status 查看进度")
+    
+    from bambu_bridge import PrinterConfig
+    from upload_and_print import upload
+    
+    try:
+        print(f"\n上传: {file_path.name}")
+        print("=" * 60)
+        
+        config = PrinterConfig.from_env()
+        print(f"目标打印机: {config.ip}")
+        
+        remote_name = upload(config, file_path, remote_dir="/cache")
+        
+        print("\n" + "=" * 60)
+        print("✅ 上传成功!")
+        print("=" * 60)
+        print(f"  文件: {remote_name}")
+        print(f"  位置: /cache")
+        print("\n下一步: 打印机屏幕选择文件开始打印")
         return 0
+        
+    except Exception as e:
+        print(f"\n❌ 上传失败: {e}")
+        return 1
 
-    print(f"\n⚠ {result.get('note')}")
-    # 读到过状态却始终没开打 → 是真失败；一次都没读到 → 网络问题，不算失败
-    return 0 if result.get("status_reads") == 0 else 1
 
-
-def cmd_status() -> int:
+def cmd_status():
     """查询打印机状态"""
-    import api
-
-    result = api.get_status()
-    if not result.get("ok"):
-        print(f"\n✗ {result.get('error')}")
-        return 1
-
-    print(f"\n打印机 {result.get('printer')}")
-    print("=" * 60)
-    print(f"状态: {result['state_zh']}")
-
-    if result.get("idle"):
-        print("✅ 空闲 —— 可以接受新任务")
-    else:
-        print("● 忙碌")
-        print(f"  进度: {result.get('percent')}%")
-        print(f"  层数: {result.get('layer')}/{result.get('total_layers')}")
-        print(f"  剩余: {result.get('remaining_minutes')} 分钟")
-        print(f"  文件: {result.get('file')}")
-
-    print("\n温度:")
-    print(f"  喷嘴: {result['nozzle']}")
-    print(f"  热床: {result['bed']}")
-    print(f"  腔体: {result['chamber']}")
-
-    if result.get("errors"):
-        print(f"\n⚠️  错误: {result['errors']}")
-    return 0
-
-
-def cmd_design() -> int:
-    """一句话（+可选照片）→ STL"""
-    argv = sys.argv[2:]
-    image = None
-    words: list[str] = []
-    index = 0
-    while index < len(argv):
-        item = argv[index]
-        if item in ("-i", "--image"):
-            if index + 1 >= len(argv):
-                print("用法: -i 后面跟图片路径")
-                return 1
-            image = argv[index + 1]
-            index += 2
-            continue
-        words.append(item)
-        index += 1
-
-    prompt = " ".join(words).strip()
-    if not prompt:
-        print('用法: python main.py design "做个放两节5号电池的槽子" [-i 照片.jpg]')
-        return 1
-
-    import api
-
-    result = api.design_model(prompt, image=image)
-
-    # 缺关键尺寸 → 问一次，拿到答案再继续
-    if not result.get("ok") and result.get("need_input"):
-        need = result["need_input"]
-        print(f"\n需要确认: {need['question']}")
-        answers: dict = {}
-        fields = need.get("fields") or []
-        if not fields:
-            fields = ["补充说明"]
-        for field in fields:
-            try:
-                value = input(f"  {field}: ").strip()
-            except EOFError:
-                return 1
-            if value:
-                answers[field] = value
-        if not answers:
+    from bambu_bridge import X1CBridge, PrinterConfig, GCODE_STATE_ZH
+    
+    try:
+        config = PrinterConfig.from_env()
+        print(f"\n查询打印机: {config.ip}")
+        print("=" * 60)
+        
+        bridge = X1CBridge(config, allow_real_actions=False)
+        
+        if not bridge.connect(wait=True, require_subscribe=True, retries=2):
+            print("❌ 连接失败")
+            if bridge.connack_code is not None:
+                print(f"   打印机拒绝连接 (code={bridge.connack_code})")
+                if bridge.connack_code in (4, 5):
+                    print("   可能是访问码不对或已过期")
+            else:
+                print("   网络超时或打印机未响应")
             return 1
-        result = api.design_model(prompt, image=image, answers=answers)
+        
+        # 等待状态推送
+        print("等待状态数据...")
+        import time
+        time.sleep(2)
+        
+        state = bridge.state
+        info = state.print_info
+        
+        if not info:
+            print("❌ 未收到状态数据")
+            print("   检查序列号是否正确")
+            bridge.disconnect()
+            return 1
+        
+        # 显示状态
+        print("\n" + "=" * 60)
+        print("打印机状态")
+        print("=" * 60)
+        
+        gcode_state = state.gcode_state
+        state_zh = GCODE_STATE_ZH.get(gcode_state or "", gcode_state)
+        
+        print(f"\n状态: {state_zh}")
+        
+        if gcode_state in ("IDLE", "FINISH", None):
+            print("✅ 空闲 - 可以接受新任务")
+        else:
+            print(f"● 忙碌")
+            print(f"  进度: {state.progress_percent}%")
+            print(f"  层数: {state.layer_num}/{state.total_layers}")
+            print(f"  剩余: {state.remaining_minutes} 分钟")
+            print(f"  文件: {state.current_file}")
+        
+        print(f"\n温度:")
+        print(f"  喷嘴: {state.nozzle_temp}°C / {state.nozzle_target}°C")
+        print(f"  热床: {state.bed_temp}°C / {state.bed_target}°C")
+        print(f"  腔体: {state.chamber_temp}°C")
+        
+        if state.hms_errors:
+            print(f"\n⚠️  错误: {state.hms_errors}")
+        
+        bridge.disconnect()
+        return 0
+        
+    except Exception as e:
+        print(f"\n❌ 查询失败: {e}")
+        return 1
 
-    if not result.get("ok"):
-        print(f"✗ {result.get('error')}")
+
+def cmd_print():
+    """上传并自动打印"""
+    if len(sys.argv) < 3:
+        print("用法: python main.py print 文件.3mf [--ams 槽位]")
+        return 1
+    
+    file_path = Path(sys.argv[2])
+    if not file_path.exists():
+        print(f"❌ 文件不存在: {file_path}")
+        return 1
+    
+    if file_path.suffix.lower() != ".3mf":
+        print(f"❌ 只支持 .3mf 文件")
+        return 1
+    
+    # 解析 AMS 槽位参数
+    ams_slot = 0
+    if "--ams" in sys.argv:
+        try:
+            idx = sys.argv.index("--ams")
+            ams_slot = int(sys.argv[idx + 1])
+        except (IndexError, ValueError):
+            print("❌ --ams 参数格式错误，应为: --ams 0")
+            return 1
+    
+    import api
+    
+    try:
+        print(f"\n上传并打印: {file_path.name}")
+        print("=" * 60)
+        print(f"AMS 槽位: {ams_slot}")
+        print()
+        
+        result = api.upload_and_print(file_path, ams_slot=ams_slot)
+        
+        if not result.get("ok"):
+            print("\n❌ 失败!")
+            print("=" * 60)
+            
+            if result.get("stage") == "upload":
+                upload = result.get("upload", {})
+                print(f"上传失败: {upload.get('error', '未知错误')}")
+            else:
+                upload = result.get("upload", {})
+                print_result = result.get("print", {})
+                print(f"✅ 上传成功: {upload.get('name')}")
+                print(f"❌ 打印失败: {print_result.get('error', '未知错误')}")
+                
+                if print_result.get("stage") == "busy":
+                    print(f"\n打印机正在打印: {print_result.get('file')}")
+                    print(f"进度: {print_result.get('percent')}%")
+                    print("\n请等待当前任务完成后再试")
+            
+            return 1
+        
+        upload = result.get("upload", {})
+        print_result = result.get("print", {})
+        
+        print("\n" + "=" * 60)
+        print("✅ 上传成功!")
+        print("=" * 60)
+        print(f"  文件: {upload.get('name')}")
+        print(f"  大小: {upload.get('size', 0) / 1024 / 1024:.1f} MB")
+        
+        if print_result.get("started"):
+            print("\n" + "=" * 60)
+            print("✅ 打印已开始!")
+            print("=" * 60)
+            print(f"  状态: {print_result.get('state', 'RUNNING')}")
+            print(f"\n查看进度: python main.py status")
+        else:
+            print("\n⚠️  打印指令已发送，但未确认启动")
+            print(f"   {print_result.get('note', '')}")
+            print(f"\n稍后查看: python main.py status")
+        
+        return 0
+        
+    except Exception as e:
+        print(f"\n❌ 失败: {e}")
+        return 1
+
+
+def cmd_generate():
+    """大模型生成 3D 模型"""
+    if len(sys.argv) < 3:
+        print("用法: python main.py generate \"描述\"")
+        return 1
+    
+    prompt = sys.argv[2]
+    
+    import api
+    
+    try:
+        print(f"\n生成需求: {prompt}")
+        print("=" * 60)
+        print("调用 AI 模型...")
+        
+        result = api.design_model(prompt)
+        
+        if not result.get("ok"):
+            if "need_input" in result:
+                need = result["need_input"]
+                print(f"\n❓ {need.get('question', '需要更多信息')}")
+                print(f"\n缺少参数: {', '.join(need.get('fields', []))}")
+                return 1
+            
+            print(f"\n❌ 生成失败: {result.get('error', '未知错误')}")
+            return 1
+        
+        print("\n" + "=" * 60)
+        print("✅ 生成成功!")
+        print("=" * 60)
+        print(f"  零件: {result.get('part')}")
+        print(f"  文件: {result.get('stl')}")
+        print(f"  尺寸: {' × '.join(map(str, result.get('size_mm', [])))} mm")
+        print(f"  体积: {result.get('volume_cm3', 0)} cm³")
+        
         if result.get("message"):
-            print(f"  模型说明: {result['message']}")
+            print(f"\n{result['message']}")
+        
+        print(f"\n下一步:")
+        print(f"  1. 用 Bambu Studio 打开 {result.get('stl')}")
+        print(f"  2. 切片并导出 .3mf")
+        print(f"  3. python main.py print 文件.3mf")
+        
+        return 0
+        
+    except Exception as e:
+        print(f"\n❌ 失败: {e}")
         return 1
 
-    print("\n" + "=" * 60)
-    print("✅ 模型已生成")
-    print("=" * 60)
-    print(f"  零件: {result['part']}")
-    print(f"  参数: {result['params']}")
-    print(f"  尺寸: {' × '.join(str(v) for v in result['size_mm'])} mm")
-    print(f"  体积: {result.get('volume_cm3')} cm³")
-    print(f"  文件: {result['stl']}")
-    if result.get("message"):
-        print(f"\n{result['message']}")
-    print("\n下一步：Bambu Studio 打开该 STL → 切片 → 文件 → 导出 → "
-          "导出单盘切片文件")
-    print("         然后 python main.py print 切片.gcode.3mf")
-    return 0
 
-
-COMMANDS = {
-    "convert": cmd_convert,
-    "design": cmd_design,
-    "upload": cmd_upload,
-    "print": cmd_print,
-    "status": cmd_status,
-}
-
-
-def main() -> int:
-    argv = [a for a in sys.argv[1:] if a not in ("-v", "--verbose")]
-    if not argv or argv[0] in ("-h", "--help"):
+def main():
+    if len(sys.argv) < 2:
         print(__doc__)
-        return 1 if not argv else 0
-
-    command = argv[0]
-    handler = COMMANDS.get(command)
-    if handler is None:
-        print(f"未知命令: {command}")
-        print(f"可用命令: {', '.join(COMMANDS)}")
         return 1
-
-    sys.argv = [sys.argv[0]] + argv
-    return handler()
+    
+    command = sys.argv[1]
+    
+    if command == "upload":
+        return cmd_upload()
+    elif command == "print":
+        return cmd_print()
+    elif command == "status":
+        return cmd_status()
+    elif command == "generate":
+        return cmd_generate()
+    else:
+        print(f"未知命令: {command}")
+        print("\n可用命令: upload, print, status, generate")
+        return 1
 
 
 if __name__ == "__main__":

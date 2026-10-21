@@ -27,7 +27,13 @@ from bambu_bridge import (
     build_print_payload,
     fmt_temp,
 )
-from upload_and_print import is_sliced_3mf, make_ftp, remote_size, upload_with_retry
+from upload_and_print import (  # noqa: E402
+    is_sliced_3mf,
+    make_ftp,
+    remote_mtime,
+    remote_size,
+    upload_with_retry,
+)
 
 # 打印机正在动的状态（这些状态下一律拒绝下发新任务）
 ACTIVE_STATES = ("RUNNING", "PREPARE", "PAUSE", "SLICING")
@@ -99,8 +105,26 @@ def get_status() -> dict[str, Any]:
         "bed": fmt_temp(state.bed_temp, state.bed_target),
         "chamber": fmt_temp(state.chamber_temp),
         "errors": state.hms_errors,
+        "ams": _ams_slots(state.print_info),
         "printer": config.ip,
     }
+
+
+def _ams_slots(print_info: dict) -> list[dict[str, Any]]:
+    """把 AMS 各槽整理成前端好用的形式（槽位、材料、颜色、是否可用）。"""
+    slots: list[dict[str, Any]] = []
+    units = (print_info.get("ams") or {}).get("ams") or []
+    for unit in units:
+        for tray in unit.get("tray") or []:
+            kind = tray.get("tray_type")
+            slots.append({
+                "slot": int(tray.get("id", 0)),
+                "type": kind,
+                "color": "#" + (tray.get("tray_color") or "")[:6] if tray.get("tray_color") else None,
+                "remain": tray.get("remain"),
+                "usable": bool(kind),
+            })
+    return sorted(slots, key=lambda item: item["slot"])
 
 
 def _connect_error(connack, connected_but_empty: bool) -> str:
@@ -116,8 +140,11 @@ def _connect_error(connack, connected_but_empty: bool) -> str:
 # ---------------------------------------------------------------- 上传
 
 
-def upload_file(local_path: str | Path, remote_dir: str = "/") -> dict[str, Any]:
+def upload_file(local_path: str | Path, remote_dir: str = "/",
+                progress=None) -> dict[str, Any]:
     """把一个切片好的 .3mf 上传到打印机。
+
+    progress: 可选回调 progress(已发送字节, 总字节)，用于显示上传进度。
 
     返回::
 
@@ -137,7 +164,8 @@ def upload_file(local_path: str | Path, remote_dir: str = "/") -> dict[str, Any]
 
     try:
         config = _config()
-        name = upload_with_retry(config, path, remote_dir=remote_dir)
+        name = upload_with_retry(config, path, remote_dir=remote_dir,
+                                 progress=progress)
     except SystemExit as exc:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:  # noqa: BLE001
@@ -163,9 +191,14 @@ def remote_file_info(name: str, remote_dir: str = "/") -> dict[str, Any]:
         ftp = make_ftp(config, timeout=90)
         if remote_dir not in ("", "/"):
             ftp.cwd(remote_dir)
-        return {"connected": True, "size": remote_size(ftp, name)}
+        return {
+            "connected": True,
+            "size": remote_size(ftp, name),
+            "mtime": remote_mtime(ftp, name),
+        }
     except Exception as exc:  # noqa: BLE001
-        return {"connected": False, "size": None, "error": f"连不上打印机: {exc}"}
+        return {"connected": False, "size": None, "mtime": None,
+                "error": f"连不上打印机: {exc}"}
     finally:
         if ftp is not None:
             try:

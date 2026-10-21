@@ -696,5 +696,47 @@ class TestDesignModel(unittest.TestCase):
         self.assertIn("没有生成", result["error"])
 
 
+class TestNeedsUpload(unittest.TestCase):
+    """打印机上那份要不要重传：大小 + 修改时间。"""
+
+    def _file(self, name: str, size: int = 100, mtime: int = 1_700_000_000):
+        import os
+
+        folder = _tmp_dir(self.id())
+        target = folder / name
+        target.write_bytes(b"x" * size)
+        os.utime(target, (mtime, mtime))
+        return target
+
+    def test_same_size_and_time_skips(self):
+        import server
+
+        local = self._file("a.3mf", 100, 1_700_000_000)
+        info = {"size": 100, "mtime": 1_700_000_000 + 10}
+        self.assertFalse(server._needs_upload(local, info))
+
+    def test_size_differs_reuploads(self):
+        import server
+
+        local = self._file("b.3mf", 100, 1_700_000_000)
+        info = {"size": 99, "mtime": 1_700_000_000}
+        self.assertTrue(server._needs_upload(local, info))
+
+    def test_mtime_drift_reuploads(self):
+        """重新切片后字节数可能刚好相同，靠时间戳兜住。"""
+        import server
+
+        local = self._file("c.3mf", 100, 1_700_000_000)
+        info = {"size": 100, "mtime": 1_700_000_000 + 3600}
+        self.assertTrue(server._needs_upload(local, info))
+
+    def test_unknown_remote_time_falls_back_to_size(self):
+        import server
+
+        local = self._file("d.3mf", 100, 1_700_000_000)
+        info = {"size": 100, "mtime": None}
+        self.assertFalse(server._needs_upload(local, info))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

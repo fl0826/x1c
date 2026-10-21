@@ -37,195 +37,125 @@ sys.path.insert(0, str(_HERE))
 
 
 def cmd_upload():
-    """上传 3MF 文件到打印机"""
+    """上传 3MF 文件到打印机（根目录，和打印指令一致）"""
     if len(sys.argv) < 3:
         print("用法: python main.py upload 文件.3mf")
         return 1
-    
+
     file_path = Path(sys.argv[2])
     if not file_path.exists():
         print(f"❌ 文件不存在: {file_path}")
         return 1
-    
     if file_path.suffix.lower() != ".3mf":
-        print(f"❌ 只支持 .3mf 文件")
+        print("❌ 只支持 .3mf 文件")
         return 1
-    
-    from bambu_bridge import PrinterConfig
-    from upload_and_print import upload
-    
-    try:
-        print(f"\n上传: {file_path.name}")
-        print("=" * 60)
-        
-        config = PrinterConfig.from_env()
-        print(f"目标打印机: {config.ip}")
-        
-        remote_name = upload(config, file_path, remote_dir="/cache")
-        
-        print("\n" + "=" * 60)
-        print("✅ 上传成功!")
-        print("=" * 60)
-        print(f"  文件: {remote_name}")
-        print(f"  位置: /cache")
-        print("\n下一步: 打印机屏幕选择文件开始打印")
-        return 0
-        
-    except Exception as e:
-        print(f"\n❌ 上传失败: {e}")
+
+    import api
+
+    print(f"\n上传: {file_path.name}")
+    print("=" * 60)
+
+    result = api.upload_file(file_path)
+    if not result.get("ok"):
+        print(f"\n❌ {result.get('error')}")
+        if result.get("hint"):
+            print(f"   {result['hint']}")
         return 1
+
+    print("\n" + "=" * 60)
+    print("✅ 上传成功")
+    print("=" * 60)
+    print(f"  文件: {result['name']}")
+    print(f"  大小: {(result.get('size') or 0) / 1024 / 1024:.2f} MB")
+    print("\n下一步: python main.py print 同名文件")
+    return 0
 
 
 def cmd_status():
     """查询打印机状态"""
-    from bambu_bridge import X1CBridge, PrinterConfig, GCODE_STATE_ZH
-    
-    try:
-        config = PrinterConfig.from_env()
-        print(f"\n查询打印机: {config.ip}")
-        print("=" * 60)
-        
-        bridge = X1CBridge(config, allow_real_actions=False)
-        
-        if not bridge.connect(wait=True, require_subscribe=True, retries=2):
-            print("❌ 连接失败")
-            if bridge.connack_code is not None:
-                print(f"   打印机拒绝连接 (code={bridge.connack_code})")
-                if bridge.connack_code in (4, 5):
-                    print("   可能是访问码不对或已过期")
-            else:
-                print("   网络超时或打印机未响应")
-            return 1
-        
-        # 等待状态推送
-        print("等待状态数据...")
-        import time
-        time.sleep(2)
-        
-        state = bridge.state
-        info = state.print_info
-        
-        if not info:
-            print("❌ 未收到状态数据")
-            print("   检查序列号是否正确")
-            bridge.disconnect()
-            return 1
-        
-        # 显示状态
-        print("\n" + "=" * 60)
-        print("打印机状态")
-        print("=" * 60)
-        
-        gcode_state = state.gcode_state
-        state_zh = GCODE_STATE_ZH.get(gcode_state or "", gcode_state)
-        
-        print(f"\n状态: {state_zh}")
-        
-        if gcode_state in ("IDLE", "FINISH", None):
-            print("✅ 空闲 - 可以接受新任务")
-        else:
-            print(f"● 忙碌")
-            print(f"  进度: {state.progress_percent}%")
-            print(f"  层数: {state.layer_num}/{state.total_layers}")
-            print(f"  剩余: {state.remaining_minutes} 分钟")
-            print(f"  文件: {state.current_file}")
-        
-        print(f"\n温度:")
-        print(f"  喷嘴: {state.nozzle_temp}°C / {state.nozzle_target}°C")
-        print(f"  热床: {state.bed_temp}°C / {state.bed_target}°C")
-        print(f"  腔体: {state.chamber_temp}°C")
-        
-        if state.hms_errors:
-            print(f"\n⚠️  错误: {state.hms_errors}")
-        
-        bridge.disconnect()
-        return 0
-        
-    except Exception as e:
-        print(f"\n❌ 查询失败: {e}")
+    import api
+
+    result = api.get_status()
+    print(f"\n查询打印机: {result.get('printer', '?')}")
+    print("=" * 60)
+
+    if not result.get("ok"):
+        print(f"\n❌ {result.get('error')}")
         return 1
+
+    print(f"\n状态: {result['state_zh']}")
+    print(f"文件: {result.get('file') or '—'}")
+    print(f"进度: {result.get('percent')}%   "
+          f"层: {result.get('layer')}/{result.get('total_layers')}   "
+          f"剩余: {result.get('remaining_minutes')} 分")
+    print(f"喷嘴: {result['nozzle']}")
+    print(f"热床: {result['bed']}")
+    print(f"腔体: {result['chamber']}")
+
+    ams = result.get("ams") or []
+    if ams:
+        print("\nAMS:")
+        for slot in ams:
+            kind = slot.get("type") or "空"
+            print(f"  槽 {slot['slot']}: {kind}")
+
+    if result.get("errors"):
+        print(f"\n⚠ 错误: {result['errors']}")
+    return 0
 
 
 def cmd_print():
-    """上传并自动打印"""
+    """上传并打印"""
     if len(sys.argv) < 3:
         print("用法: python main.py print 文件.3mf [--ams 槽位]")
         return 1
-    
+
     file_path = Path(sys.argv[2])
     if not file_path.exists():
         print(f"❌ 文件不存在: {file_path}")
         return 1
-    
     if file_path.suffix.lower() != ".3mf":
-        print(f"❌ 只支持 .3mf 文件")
+        print("❌ 只支持 .3mf 文件")
         return 1
-    
-    # 解析 AMS 槽位参数
+
     ams_slot = 0
     if "--ams" in sys.argv:
         try:
-            idx = sys.argv.index("--ams")
-            ams_slot = int(sys.argv[idx + 1])
+            ams_slot = int(sys.argv[sys.argv.index("--ams") + 1])
         except (IndexError, ValueError):
-            print("❌ --ams 参数格式错误，应为: --ams 0")
+            print("❌ --ams 格式错误，应为: --ams 0")
             return 1
-    
+
     import api
-    
-    try:
-        print(f"\n上传并打印: {file_path.name}")
-        print("=" * 60)
-        print(f"AMS 槽位: {ams_slot}")
-        print()
-        
-        result = api.upload_and_print(file_path, ams_slot=ams_slot)
-        
-        if not result.get("ok"):
-            print("\n❌ 失败!")
-            print("=" * 60)
-            
-            if result.get("stage") == "upload":
-                upload = result.get("upload", {})
-                print(f"上传失败: {upload.get('error', '未知错误')}")
-            else:
-                upload = result.get("upload", {})
-                print_result = result.get("print", {})
-                print(f"✅ 上传成功: {upload.get('name')}")
-                print(f"❌ 打印失败: {print_result.get('error', '未知错误')}")
-                
-                if print_result.get("stage") == "busy":
-                    print(f"\n打印机正在打印: {print_result.get('file')}")
-                    print(f"进度: {print_result.get('percent')}%")
-                    print("\n请等待当前任务完成后再试")
-            
-            return 1
-        
-        upload = result.get("upload", {})
-        print_result = result.get("print", {})
-        
-        print("\n" + "=" * 60)
-        print("✅ 上传成功!")
-        print("=" * 60)
-        print(f"  文件: {upload.get('name')}")
-        print(f"  大小: {upload.get('size', 0) / 1024 / 1024:.1f} MB")
-        
-        if print_result.get("started"):
-            print("\n" + "=" * 60)
-            print("✅ 打印已开始!")
-            print("=" * 60)
-            print(f"  状态: {print_result.get('state', 'RUNNING')}")
-            print(f"\n查看进度: python main.py status")
-        else:
-            print("\n⚠️  打印指令已发送，但未确认启动")
-            print(f"   {print_result.get('note', '')}")
-            print(f"\n稍后查看: python main.py status")
-        
-        return 0
-        
-    except Exception as e:
-        print(f"\n❌ 失败: {e}")
+
+    print(f"\n上传并打印: {file_path.name}   (AMS 槽位 {ams_slot})")
+    print("=" * 60)
+    result = api.upload_and_print(file_path, ams_slot=ams_slot)
+
+    upload = result.get("upload") or {}
+    printed = result.get("print") or {}
+
+    if not upload.get("ok"):
+        print(f"❌ 上传失败: {upload.get('error')}")
         return 1
+    print(f"✅ 已上传: {upload.get('name')} "
+          f"({(upload.get('size') or 0) / 1024 / 1024:.2f} MB)")
+
+    if printed.get("started"):
+        print(f"✅ 已开始打印（状态 {printed.get('state')}）")
+        print("   查看进度: python main.py status")
+        return 0
+
+    if printed.get("ok"):
+        print(f"⚠ 指令已发出但未确认: {printed.get('note', '')}")
+        print("   稍后用 python main.py status 确认")
+        return 0
+
+    print(f"❌ 未开始打印: {printed.get('error')}")
+    if printed.get("stage") == "busy":
+        print(f"   打印机正在打印: {printed.get('file')} "
+              f"({printed.get('percent')}%)")
+    return 1
 
 
 def cmd_generate():

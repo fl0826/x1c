@@ -7,7 +7,7 @@
 ```bash
 conda activate fnn          # 只有转换需要
 pip install -r requirements.txt
-cp .env.example .env        # 填打印机 IP / 序列号 / 访问码
+copy .env.example .env      # 填打印机 IP / 序列号 / 访问码
 ```
 
 ## 命令
@@ -80,6 +80,7 @@ api.get_status()
 | 屏幕报「禁用AMS时仍从AMS加载料」 | 加 `--ams 槽号` |
 | 上传超时 | 自动重试 3 次；仍失败可设 `X1C_UPLOAD_TIMEOUT=300` |
 | 页面显示「重连中」 | 打印时偶发，几秒自愈 |
+| 状态显示「空闲（上次中断）」 | 上次任务被打断的状态残留，直接打印即可清除 |
 
 ## 测试
 

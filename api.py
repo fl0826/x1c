@@ -91,10 +91,15 @@ def get_status() -> dict[str, Any]:
         }
 
     code = state.gcode_state
+    errors = state.hms_errors
+    state_zh = GCODE_STATE_ZH.get(code or "", code)
+    # 固件的 FAILED 会粘住：进度 0 且没有错误码时，机器其实已经空闲了
+    if code == "FAILED" and not (state.progress_percent or 0) and not errors:
+        state_zh = "空闲（上次中断）"
     return {
         "ok": True,
         "state": code,
-        "state_zh": GCODE_STATE_ZH.get(code or "", code),
+        "state_zh": state_zh,
         "idle": code not in ACTIVE_STATES,
         "percent": state.progress_percent,
         "layer": state.layer_num,
@@ -104,7 +109,7 @@ def get_status() -> dict[str, Any]:
         "nozzle": fmt_temp(state.nozzle_temp, state.nozzle_target),
         "bed": fmt_temp(state.bed_temp, state.bed_target),
         "chamber": fmt_temp(state.chamber_temp),
-        "errors": state.hms_errors,
+        "errors": errors,
         "ams": _ams_slots(state.print_info),
         "printer": config.ip,
     }

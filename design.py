@@ -27,19 +27,40 @@ OUTPUT_DIR = _HERE / "output"
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120 Safari/537.36")
 
-SYSTEM_PROMPT = """你是 3D 打印零件设计助手，帮用户把一个需求变成可打印的 STL。
+SYSTEM_PROMPT = """你是 3D 打印零件设计助手。用户通常只输入一个物品名（例如"电池槽"）。
+你的任务：在支持范围内给出可打印方案。
 
-规则（必须遵守）：
-1. 只能使用零件库里的零件，不许自己发明几何或坐标。先调用 list_parts 看有哪些零件和参数。
-2. 尺寸来源只能是这三种，按优先级：
-   a) 公认标准规格（AA 电池 14.0×50.0mm、M3 螺丝、USB-C 8.25×2.4mm 等）——可直接用，说明依据
-   b) 用户明确给出的数字 —— 直接用
-   c) 联网查到的公开规格 —— 用 web_lookup 查，并在回答里说明来源
-3. 照片只能识别"是什么东西"，不能用来量尺寸。不要从照片估算毫米数。
-4. 缺少关键尺寸（线径、孔距、厚度等）时，调用 ask_user 提问，不要自己假设。
-5. 参数必须落在零件允许的范围内，不确定就先查/先问。
-6. 最后调用 build_part 生成并校验，通过后再简短总结（零件、关键尺寸、注意事项）。
-7. 全程用中文，回答简短，不要长篇解释。"""
+支持范围只有这 8 类（其他一律不做）：
+  安装底板 / 钥匙挂钩 / 理线夹 / 垫圈 / 收纳盒 / 电池槽 / 杯垫 / 手机支架
+
+规则：
+1. 先判断用户要的东西属不属于上面 8 类。
+   - 属于 → 调用 list_parts 选对应零件。
+   - 不属于 → **不许偷偷换成别的零件**。
+     例如"鼠标"不能改做成"鼠标收纳盒"，"杯子"不能改做成杯垫，
+     "笔筒"不能改做成收纳盒。
+     必须先用 ask_user 问一句（confirm=true，不要给 fields）：
+       "做不到 <物品> 本身，要不要改做 <最接近的替代>？"
+     用户同意后才继续；不同意就到此为止。
+2. 特别注意：**功能依赖特殊结构的**，即使"容器类"看起来接近，也不能直接做。
+   例如：纸巾盒（需要抽纸口）、花盆（需要排水孔）、笔筒（需要高筒）、
+   杯子（需要密封）、鼠标（需要曲面）。
+   这类情况必须先问用户是否接受"简化版"，用户同意后再按现有零件做。
+3. 只有"同一个物品在不同场景下确实可能选不同零件"时才提问（一次最多 2 个）。
+4. 缺的参数一律取默认值，不要问用户：
+   - 数量默认 2
+   - 壁厚 2.5mm、底板 3mm、净空余量 1.0mm
+   - 理线夹：线径 3.5mm（USB 线粗细）、槽间距 12mm
+   - 收纳盒：80×60×30mm
+   - 安装底板：60×60mm、M3 孔
+   - 杯垫：90×4mm；手机支架：80×70×70mm、后倾 20°
+   - 垫圈：高 5mm，外径 = 孔径 + 8mm
+   - 标准件用公认规格：AA 14.0×50.0、AAA 10.5×44.5、18650 18.4×65.0、M3 螺丝
+5. 拿不准的物品先 web_lookup 查公称规格；查不到再按最保守的常见尺寸。
+6. 照片只用来判断"是什么东西"，不要从照片量毫米。
+7. 参数要在零件允许范围内；最后调用 propose_part 给出方案（会先校验，不写文件），
+   等用户确认后才生成 STL。不要自己写文件名或路径。
+8. 回答用中文，简短：零件、关键尺寸、一句注意事项。"""
 
 TOOLS = [
     {
@@ -68,15 +89,22 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "ask_user",
-            "description": "信息不足时向用户提问（例如线径、孔距）。不要用它问能查到的东西",
+            "description": ("向用户提问。两种用途："
+                            "① confirm=true：征求同意（要不要改做替代方案），"
+                            "界面上只出「是/否」两个按钮，此时不要填 fields；"
+                            "② 需要具体数字时（线径、孔距）给 fields 列名。"),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "question": {"type": "string"},
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "是/否确认类问题设为 true（此时不要 fields）",
+                    },
                     "fields": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "需要用户提供的字段名，如 ['线径_mm']",
+                        "description": "需要用户填写的字段名，如 ['线径_mm']",
                     },
                 },
                 "required": ["question"],
@@ -86,8 +114,9 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "build_part",
-            "description": "按零件名和参数生成 STL 并校验",
+            "name": "propose_part",
+            "description": ("按零件名和参数给出方案（会先建网格校验，但不写文件）；"
+                            "用户确认后才生成 STL"),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -336,14 +365,24 @@ def web_lookup(query: str) -> dict:
 
 # ---------------------------------------------------------------- 生成
 
+LAST_PROPOSAL: dict | None = None
+CURRENT_PROMPT = ""
 
-def _build(part: str, params: dict) -> dict:
-    """生成 STL 并校验。"""
+
+def _safe_name(text: str) -> str:
+    """把用户输入变成安全文件名（去非法字符，保留中文）。"""
+    cleaned = re.sub(r'[\\/:*?"<>|\r\n\t]', "", text or "")
+    cleaned = re.sub(r"\s+", "_", cleaned).strip("._ ")
+    return cleaned[:30]
+
+
+def _make_mesh(part: str, params: dict):
+    """校验参数并建网格（不写文件）。返回 (结果, mesh)。"""
     if part not in CATALOG:
         return {
             "ok": False,
             "error": f"没有零件 {part!r}，可选: {', '.join(CATALOG)}",
-        }
+        }, None
 
     spec = CATALOG[part]
     unknown = [key for key in params if key not in spec.params]
@@ -351,38 +390,84 @@ def _build(part: str, params: dict) -> dict:
         return {
             "ok": False,
             "error": f"{part} 不认识参数 {unknown}，可用: {list(spec.params)}",
-        }
+        }, None
 
     try:
         mesh = build(part, **params)
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": f"生成失败: {exc}"}
+        return {"ok": False, "error": f"生成失败: {exc}"}, None
 
-    if isinstance(mesh, tuple):   # 有些零件返回多个网格（如盒身+盒盖）
+    if isinstance(mesh, tuple):   # 有些零件返回多块（盒身 + 盒盖）
         mesh = mesh[0]
 
     problems = mesh.validate()
     size = [round(value, 1) for value in mesh.size()]
     if problems:
         return {"ok": False, "error": "校验未通过: " + "; ".join(problems),
-                "size_mm": size}
-
+                "size_mm": size}, None
     if max(size) > 256:
         return {"ok": False,
                 "error": f"尺寸 {size} 超过 X1C 的 256mm 打印范围",
-                "size_mm": size}
+                "size_mm": size}, None
 
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    stamp = datetime.now().strftime("%H%M%S")
-    path = OUTPUT_DIR / f"{part}_{stamp}.stl"
-    mesh.to_stl_binary(path)
     return {
         "ok": True,
-        "stl": str(path),
         "part": part,
         "params": params,
         "size_mm": size,
         "volume_cm3": round(mesh.volume() / 1000, 2),
+    }, mesh
+
+
+def propose_part(part: str, params: dict, summary: str = "") -> dict:
+    """先提议：建网格并校验，但**不写文件**，等用户确认。"""
+    global LAST_PROPOSAL
+    result, mesh = _make_mesh(part, params)
+    if not result["ok"]:
+        return result
+    result["summary"] = summary
+    result["prompt"] = CURRENT_PROMPT
+    label = CATALOG.get(part)
+    result["name"] = label.name if label else part
+    LAST_PROPOSAL = dict(result, mesh=mesh)
+    return {
+        "ok": True,
+        "staged": True,
+        "part": part,
+        "params": params,
+        "size_mm": result["size_mm"],
+        "volume_cm3": result["volume_cm3"],
+    }
+
+
+def write_stl(proposal: dict | None = None) -> dict:
+    """把提议写成 STL（用户确认后调用）。"""
+    proposal = proposal or LAST_PROPOSAL
+    if not proposal:
+        return {"ok": False, "error": "没有待确认的方案"}
+
+    mesh = proposal.get("mesh")
+    if mesh is None:
+        built, mesh = _make_mesh(proposal["part"], proposal["params"])
+        if not built["ok"]:
+            return built
+
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    # 文件名用零件的中文名（短、可预测），不用用户原话
+    label = CATALOG.get(proposal["part"])
+    base = _safe_name(label.name if label else proposal["part"]) or "model"
+    path = OUTPUT_DIR / f"{base}-{stamp}.stl"
+    mesh.to_stl_binary(path)
+    return {
+        "ok": True,
+        "stl": str(path),
+        "name": proposal.get("name") or proposal["part"],
+        "part": proposal["part"],
+        "params": proposal["params"],
+        "size_mm": proposal["size_mm"],
+        "volume_cm3": proposal.get("volume_cm3"),
+        "summary": proposal.get("summary", ""),
     }
 
 
@@ -414,6 +499,9 @@ def design_model(prompt: str, image: str | Path | None = None,
     if not prompt.strip():
         return {"ok": False, "error": "需求不能为空"}
 
+    global CURRENT_PROMPT
+    CURRENT_PROMPT = prompt.strip()
+
     text = prompt
     if answers:
         filled = "；".join(f"{key}={value}" for key, value in answers.items())
@@ -424,7 +512,7 @@ def design_model(prompt: str, image: str | Path | None = None,
         {"role": "user", "content": _user_content(text, image)},
     ]
 
-    built: dict | None = None
+    proposed = False
     last_text = ""
     for _round in range(max_rounds):
         try:
@@ -459,19 +547,24 @@ def design_model(prompt: str, image: str | Path | None = None,
             elif name == "web_lookup":
                 result = web_lookup(str(args.get("query", "")))
             elif name == "ask_user":
+                is_confirm = bool(args.get("confirm"))
                 return {
                     "ok": False,
                     "need_input": {
                         "question": args.get("question", "还需要一些信息"),
-                        "fields": args.get("fields") or [],
+                        # 确认类问题不给输入框，前端只显示 是/否
+                        "fields": [] if is_confirm else (args.get("fields") or []),
+                        "confirm": is_confirm,
                     },
                 }
-            elif name == "build_part":
-                result = _build(str(args.get("part", "")),
-                                args.get("params") or {})
+            elif name == "propose_part":
+                result = propose_part(
+                    str(args.get("part", "")),
+                    args.get("params") or {},
+                    args.get("summary", ""),
+                )
                 if result.get("ok"):
-                    built = result
-                    built["summary"] = args.get("summary", "")
+                    proposed = True
             else:
                 result = {"ok": False, "error": f"未知工具 {name}"}
 
@@ -481,13 +574,23 @@ def design_model(prompt: str, image: str | Path | None = None,
                 "content": json.dumps(result, ensure_ascii=False),
             })
 
-    if not built:
+    # 有方案就停下来等用户确认，不直接写文件
+    if proposed and LAST_PROPOSAL:
         return {
             "ok": False,
-            "error": "模型没有生成可用的零件",
+            "need_confirm": {
+                "name": LAST_PROPOSAL.get("name") or LAST_PROPOSAL["part"],
+                "part": LAST_PROPOSAL["part"],
+                "params": LAST_PROPOSAL["params"],
+                "size_mm": LAST_PROPOSAL["size_mm"],
+                "volume_cm3": LAST_PROPOSAL.get("volume_cm3"),
+                "summary": LAST_PROPOSAL.get("summary", ""),
+            },
             "message": last_text,
         }
 
-    built["ok"] = True
-    built["message"] = last_text
-    return built
+    return {
+        "ok": False,
+        "error": "模型没有给出可用的零件方案",
+        "message": last_text,
+    }

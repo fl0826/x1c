@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -329,6 +330,61 @@ def battery_holder(
     return mesh.drop_to_bed().center_xy()
 
 
+def coaster(
+    diameter: float = 90.0,
+    thickness: float = 4.0,
+    hole_diameter: float = 0.0,
+) -> Mesh:
+    """杯垫/圆垫片，可选中孔。"""
+    if thickness <= 0:
+        raise ValueError("厚度必须大于 0")
+    segments = 64
+    outer = circle_polygon(diameter / 2, segments)
+    if hole_diameter > 0:
+        if hole_diameter >= diameter:
+            raise ValueError("孔径必须小于外径")
+        polygon = polygon_with_holes(
+            outer, [circle_polygon(hole_diameter / 2, segments)])
+        return extrude(polygon, thickness)
+    return extrude_polygon(outer, thickness)
+
+
+def phone_stand(
+    width: float = 80.0,
+    depth: float = 70.0,
+    height: float = 70.0,
+    angle: float = 20.0,
+    lip: float = 12.0,
+    thickness: float = 6.0,
+) -> Mesh:
+    """手机/平板支架：单一剖面拉伸（底座 + 前挡 + 斜靠背），拓扑必然正确。
+
+    剖面在「深度 × 高度」平面里：
+      底边 → 背面竖边 → 靠背顶面 → 斜面向下 → 前挡顶面 → 前面竖边
+    """
+    if not 5 <= angle <= 45:
+        raise ValueError("靠背角度建议 5~45 度")
+    if lip < 6:
+        raise ValueError("前挡至少 6mm，否则托不住")
+    theta = math.radians(90.0 - angle)          # 靠背面与水平面的夹角
+    run = (height - lip) / math.tan(theta)      # 斜面水平投影
+    slope_x = depth - thickness - run
+    if slope_x < lip:
+        raise ValueError("尺寸不匹配：靠背太高或底座太浅")
+
+    profile = [
+        (0.0, 0.0),
+        (depth, 0.0),
+        (depth, height),
+        (depth - thickness, height),
+        (slope_x, lip),
+        (0.0, lip),
+    ]
+    mesh = extrude_polygon(profile, width)
+    # 剖面在 XY、沿 Z 拉伸；转成「高度在 Z」
+    return mesh.rotate_x(90).center_xy().drop_to_bed()
+
+
 def _rect_outline_centered(
     width: float,
     depth: float,
@@ -436,6 +492,29 @@ CATALOG: dict[str, PartSpec] = {
             "wall": "壁厚 mm",
             "base_thickness": "底板厚 mm",
             "clearance": "每格净空余量 mm，便于取放，建议 1.0",
+        },
+    ),
+    "coaster": PartSpec(
+        name="杯垫",
+        builder="coaster",
+        description="圆形杯垫/垫片，可选中孔",
+        params={
+            "diameter": "直径 mm",
+            "thickness": "厚度 mm",
+            "hole_diameter": "中心孔直径 mm，0 表示不挖孔",
+        },
+    ),
+    "phone_stand": PartSpec(
+        name="手机支架",
+        builder="phone_stand",
+        description="手机/平板支架：底座 + 前挡边 + 后倾靠背",
+        params={
+            "width": "宽度 mm",
+            "depth": "底座深度 mm",
+            "height": "靠背高度 mm",
+            "angle": "后倾角度，度，建议 15~30",
+            "lip": "前挡边高度 mm",
+            "thickness": "板材厚度 mm",
         },
     ),
 }

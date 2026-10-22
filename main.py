@@ -159,53 +159,56 @@ def cmd_print():
 
 
 def cmd_generate():
-    """大模型生成 3D 模型"""
+    """一句话生成 STL（先给方案，确认后写文件）"""
     if len(sys.argv) < 3:
-        print("用法: python main.py generate \"描述\"")
+        print('用法: python main.py generate "做个电池槽"')
         return 1
-    
+
     prompt = sys.argv[2]
-    
     import api
-    
-    try:
-        print(f"\n生成需求: {prompt}")
-        print("=" * 60)
-        print("调用 AI 模型...")
-        
-        result = api.design_model(prompt)
-        
-        if not result.get("ok"):
-            if "need_input" in result:
-                need = result["need_input"]
-                print(f"\n❓ {need.get('question', '需要更多信息')}")
-                print(f"\n缺少参数: {', '.join(need.get('fields', []))}")
-                return 1
-            
-            print(f"\n❌ 生成失败: {result.get('error', '未知错误')}")
-            return 1
-        
-        print("\n" + "=" * 60)
-        print("✅ 生成成功!")
-        print("=" * 60)
-        print(f"  零件: {result.get('part')}")
-        print(f"  文件: {result.get('stl')}")
-        print(f"  尺寸: {' × '.join(map(str, result.get('size_mm', [])))} mm")
-        print(f"  体积: {result.get('volume_cm3', 0)} cm³")
-        
-        if result.get("message"):
-            print(f"\n{result['message']}")
-        
-        print(f"\n下一步:")
-        print(f"  1. 用 Bambu Studio 打开 {result.get('stl')}")
-        print(f"  2. 切片并导出 .3mf")
-        print(f"  3. python main.py print 文件.3mf")
-        
-        return 0
-        
-    except Exception as e:
-        print(f"\n❌ 失败: {e}")
+
+    print(f"\n生成需求: {prompt}")
+    print("=" * 60)
+
+    result = api.design_model(prompt)
+
+    if result.get("need_input"):
+        need = result["need_input"]
+        print(f"\n❓ {need.get('question', '需要更多信息')}")
+        print(f"   缺少: {', '.join(need.get('fields', []))}")
         return 1
+
+    plan = result.get("need_confirm")
+    if plan:
+        size = " × ".join(str(v) for v in plan.get("size_mm", []))
+        print(f"\n方案: {plan['part']}  {size} mm  "
+              f"{plan.get('volume_cm3')} cm³")
+        print(f"参数: {plan.get('params')}")
+        if plan.get("summary"):
+            print(f"说明: {plan['summary']}")
+        try:
+            answer = input("\n确认生成？[Y/n] ").strip().lower()
+        except EOFError:
+            answer = "y"
+        if answer not in ("", "y", "yes"):
+            print("已取消")
+            return 0
+
+        final = api.confirm_design()
+        if not final.get("ok"):
+            print(f"\n❌ {final.get('error')}")
+            return 1
+        print(f"\n✅ 已生成: {final['stl']}")
+        print("\n下一步:")
+        print(f"  1. Bambu Studio 打开 {final['stl']}")
+        print("  2. 切片 → 导出单盘切片文件")
+        print("  3. python main.py print 文件.gcode.3mf")
+        return 0
+
+    print(f"\n❌ {result.get('error', '未知错误')}")
+    if result.get("message"):
+        print(f"   {str(result['message'])[:200]}")
+    return 1
 
 
 def main():

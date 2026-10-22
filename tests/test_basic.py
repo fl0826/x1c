@@ -587,27 +587,39 @@ class TestDesignHelpers(unittest.TestCase):
 
 
 class TestDesignBuild(unittest.TestCase):
-    """几何校验必须拦住不合理的零件，不能让它流到切片环节。"""
+    """几何校验要拦住不合理的零件，确认后才写文件。"""
 
     def test_unknown_part_is_rejected(self):
-        from design import _build
+        from design import propose_part
 
-        result = _build("no_such_part", {})
+        result = propose_part("no_such_part", {})
         self.assertFalse(result["ok"])
         self.assertIn("没有零件", result["error"])
 
     def test_unknown_param_is_rejected(self):
-        from design import _build
+        from design import propose_part
 
-        result = _build("battery_holder", {"nosuch": 1})
+        result = propose_part("battery_holder", {"nosuch": 1})
         self.assertFalse(result["ok"])
         self.assertIn("不认识参数", result["error"])
 
-    def test_valid_part_writes_stl(self):
-        from design import OUTPUT_DIR, _build
+    def test_proposal_does_not_write_file(self):
+        from design import OUTPUT_DIR, propose_part
 
-        result = _build("spacer", {"outer_diameter": 12.0,
-                                   "hole_diameter": 4.5, "height": 6.0})
+        before = set(OUTPUT_DIR.glob("*.stl")) if OUTPUT_DIR.is_dir() else set()
+        result = propose_part("spacer", {"outer_diameter": 12.0,
+                                         "hole_diameter": 4.5, "height": 6.0})
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertTrue(result.get("staged"))
+        after = set(OUTPUT_DIR.glob("*.stl")) if OUTPUT_DIR.is_dir() else set()
+        self.assertEqual(before, after, "提议阶段不应写文件")
+
+    def test_confirm_writes_stl(self):
+        from design import propose_part, write_stl
+
+        propose_part("spacer", {"outer_diameter": 12.0,
+                                "hole_diameter": 4.5, "height": 6.0})
+        result = write_stl()
         self.assertTrue(result["ok"], result.get("error"))
         stl = Path(result["stl"])
         self.assertTrue(stl.is_file())
@@ -616,11 +628,10 @@ class TestDesignBuild(unittest.TestCase):
         stl.unlink(missing_ok=True)
 
     def test_oversized_part_is_rejected(self):
-        from design import _build
+        from design import propose_part
 
-        # 300mm 超过 X1C 的 256mm 限制
-        result = _build("mounting_plate",
-                        {"width": 300.0, "depth": 40.0, "thickness": 3.0})
+        result = propose_part("mounting_plate",
+                              {"width": 300.0, "depth": 40.0, "thickness": 3.0})
         self.assertFalse(result["ok"])
         self.assertTrue("256" in result["error"] or "校验" in result["error"])
 
@@ -661,9 +672,9 @@ class TestDesignModel(unittest.TestCase):
             }],
         }
 
-    def test_builds_stl(self):
+    def test_proposes_and_needs_confirm(self):
         result = self._run([
-            self._tool_call("build_part", {
+            self._tool_call("propose_part", {
                 "part": "spacer",
                 "params": {"outer_diameter": 12.0, "hole_diameter": 4.5,
                            "height": 6.0},
@@ -671,9 +682,9 @@ class TestDesignModel(unittest.TestCase):
             }),
             {"role": "assistant", "content": "已生成垫圈"},
         ])
-        self.assertTrue(result["ok"], result.get("error"))
-        self.assertEqual(result["part"], "spacer")
-        Path(result["stl"]).unlink(missing_ok=True)
+        self.assertFalse(result["ok"])
+        plan = result["need_confirm"]
+        self.assertEqual(plan["part"], "spacer")
 
     def test_ask_user_returns_need_input(self):
         result = self._run([
@@ -689,11 +700,11 @@ class TestDesignModel(unittest.TestCase):
     def test_invalid_params_are_reported_back(self):
         """参数不对时要把错误交回模型，最终仍失败则返回 ok=False。"""
         result = self._run([
-            self._tool_call("build_part", {"part": "no_such", "params": {}}),
+            self._tool_call("propose_part", {"part": "no_such", "params": {}}),
             {"role": "assistant", "content": "抱歉，生成失败"},
         ])
         self.assertFalse(result["ok"])
-        self.assertIn("没有生成", result["error"])
+        self.assertIn("没有给出", result["error"])
 
 
 class TestNeedsUpload(unittest.TestCase):

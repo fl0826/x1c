@@ -15,7 +15,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import os
 import sys
 import threading
 import time
@@ -53,6 +55,32 @@ UPLOAD: dict = {
     "total": 0,
 }
 ACTIVE_STATES = ("RUNNING", "PREPARE", "PAUSE", "SLICING")
+
+# 设计任务（大模型生成 STL，一次只跑一个）
+DESIGN: dict = {
+    "busy": False,
+    "prompt": "",
+    "result": None,   # api.design_model 的返回
+    "error": None,
+    "started": 0.0,
+}
+DESIGN_LOCK = threading.Lock()
+OUTPUT = ROOT / "output"
+
+
+def run_design(prompt: str, image: str | None, answers: dict | None) -> None:
+    """后台跑一次生成。"""
+    with DESIGN_LOCK:
+        DESIGN.update(busy=True, prompt=prompt, result=None, error=None,
+                      started=time.time())
+    try:
+        result = api.design_model(prompt, image=image, answers=answers)
+    except Exception as exc:  # noqa: BLE001
+        result = {"ok": False, "error": f"生成失败: {exc}"}
+    with DESIGN_LOCK:
+        DESIGN.update(busy=False, result=result)
+        if not result.get("ok"):
+            DESIGN["error"] = result.get("error") or "生成失败"
 
 
 # ---------------------------------------------------------------- 后台轮询
@@ -150,12 +178,28 @@ class Handler(SimpleHTTPRequestHandler):
                 percent = int(UPLOAD["sent"] * 100 / UPLOAD["total"])
             self._json(dict(UPLOAD, percent=percent))
             return
+        if route == "/api/design/status":
+            with DESIGN_LOCK:
+                self._json({"ok": True, **DESIGN})
+            return
         super().do_GET()
 
     # ---------- POST ----------
 
     def do_POST(self) -> None:  # noqa: N802
         route = self.path.split("?")[0]
+        if route == "/api/design":
+            self._design_start()
+            return
+        if route == "/api/design/answer":
+            self._design_answer()
+            return
+        if route == "/api/design/confirm":
+            self._json(api.confirm_design())
+            return
+        if route == "/api/open-studio":
+            self._open_studio()
+            return
         if route != "/api/print":
             self.send_error(404, "unknown api")
             return
@@ -204,6 +248,73 @@ class Handler(SimpleHTTPRequestHandler):
         self._json(result)
         # 打印指令已发出，让前端把"上传中"切回普通状态
         UPLOAD.update(busy=False, phase="", sent=0, total=0)
+
+    # ---------- 工具 ----------
+
+    # ---------- 设计 ----------
+
+    def _design_start(self) -> None:
+        body = self._body()
+        prompt = str(body.get("prompt", "")).strip()
+        if not prompt:
+            self._json({"ok": False, "error": "缺少描述"})
+            return
+        if DESIGN["busy"]:
+            self._json({"ok": False, "error": "正在生成，请稍等"})
+            return
+
+        image_path = None
+        data = body.get("image")
+        if isinstance(data, str) and data.startswith("data:image"):
+            try:
+                header, _, payload = data.partition(",")
+                ext = "png" if "png" in header else "jpg"
+                OUTPUT.mkdir(exist_ok=True)
+                target = OUTPUT / f"upload_{int(time.time() * 1000)}.{ext}"
+                target.write_bytes(base64.b64decode(payload))
+                image_path = str(target)
+            except Exception:  # noqa: BLE001
+                image_path = None
+
+        threading.Thread(target=run_design,
+                         args=(prompt, image_path, None), daemon=True).start()
+        self._json({"ok": True, "started": True})
+
+    def _design_answer(self) -> None:
+        body = self._body()
+        answers = body.get("answers") or {}
+        prompt = str(body.get("prompt") or DESIGN.get("prompt") or "").strip()
+        if not prompt:
+            self._json({"ok": False, "error": "没有正在进行的任务"})
+            return
+        if DESIGN["busy"]:
+            self._json({"ok": False, "error": "正在生成，请稍等"})
+            return
+        threading.Thread(target=run_design,
+                         args=(prompt, None, answers), daemon=True).start()
+        self._json({"ok": True, "started": True})
+
+    def _open_studio(self) -> None:
+        body = self._body()
+        raw = str(body.get("path", "")).strip()
+        if not raw:
+            self._json({"ok": False, "error": "缺少路径"})
+            return
+        path = Path(raw).resolve()
+        allowed = (OUTPUT.resolve(), OUTBOX.resolve())
+        if not any(str(path).startswith(str(root)) for root in allowed):
+            self._json({"ok": False,
+                        "error": "只允许打开 output 或 outbox 里的文件"})
+            return
+        if not path.is_file():
+            self._json({"ok": False, "error": "文件不存在"})
+            return
+        try:
+            os.startfile(str(path))  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001
+            self._json({"ok": False, "error": f"打开失败: {exc}"})
+            return
+        self._json({"ok": True, "path": str(path)})
 
     # ---------- 工具 ----------
 

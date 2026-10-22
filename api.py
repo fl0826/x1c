@@ -373,3 +373,15 @@ def design_model(prompt: str, image: str | Path | None = None,
         return _design(prompt, image=image, answers=answers)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"生成失败: {exc}"}
+
+
+def confirm_design() -> dict[str, Any]:
+    """把上一次提议写成 STL（用户确认后调用）。"""
+    try:
+        from design import write_stl
+    except ImportError as exc:
+        return {"ok": False, "error": f"模型生成模块不可用: {exc}"}
+    try:
+        return write_stl()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"生成失败: {exc}"}
